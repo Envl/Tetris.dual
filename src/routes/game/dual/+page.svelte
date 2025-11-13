@@ -10,7 +10,6 @@
 	import type { GameMessage } from '$lib/game/types';
 
 	let localEngine: TetrisEngine;
-	let remoteEngine: TetrisEngine;
 
 	let localState = $state({
 		board: [] as number[][],
@@ -31,6 +30,9 @@
 		score: 0,
 		linesCleared: 0
 	});
+
+	// Track previous lines for shift detection
+	let previousLocalLines = 0;
 
 	let gameInterval: ReturnType<typeof setInterval>;
 	let dropSpeed = $state(600);
@@ -74,13 +76,10 @@
 
 	function initializeGame() {
 		localEngine = new TetrisEngine(true);
-		remoteEngine = new TetrisEngine(true);
-
 		localEngine.initialize();
-		remoteEngine.initialize();
 
 		updateLocalState();
-		updateRemoteState();
+		previousLocalLines = 0;
 
 		window.addEventListener('keydown', handleKeyDown);
 	}
@@ -110,14 +109,6 @@
 			clearInterval(gameInterval);
 			sendGameOver();
 		}
-	}
-
-	function updateRemoteState() {
-		remoteState.board = remoteEngine.getBoard();
-		remoteState.colorBoard = remoteEngine.getColorBoard();
-		remoteState.currentPiece = remoteEngine.getCurrentPiece();
-		remoteState.score = remoteEngine.getScore();
-		remoteState.linesCleared = remoteEngine.getLinesCleared();
 	}
 
 	function handleKeyDown(e: KeyboardEvent) {
@@ -169,17 +160,19 @@
 			};
 			p2p.send(message);
 
-			// Check if lines were cleared and shift opponent's board
-			const previousLines = remoteState.linesCleared;
-			if (localState.linesCleared > previousLines) {
-				const linesDiff = localState.linesCleared - previousLines;
-				if (linesDiff >= 2) {
+			// Check if WE cleared lines since our last check (not comparing with opponent!)
+			const newLinesCleared = localState.linesCleared - previousLocalLines;
+			if (newLinesCleared > 0) {
+				// Like Tetris DS: clearing 2+ lines shifts opponent's board
+				if (newLinesCleared >= 2) {
 					const shiftMessage: GameMessage = {
 						type: 'linesCleared',
-						data: { lines: linesDiff }
+						data: { lines: Math.floor(newLinesCleared / 2) }
 					};
 					p2p.send(shiftMessage);
 				}
+				// Update tracker
+				previousLocalLines = localState.linesCleared;
 			}
 		}
 	}
@@ -200,6 +193,7 @@
 	function handleRemoteMessage(message: GameMessage) {
 		switch (message.type) {
 			case 'state':
+				// Update remote state from opponent's game
 				remoteState.board = message.data.board;
 				remoteState.colorBoard = message.data.colorBoard;
 				remoteState.currentPiece = message.data.currentPiece;
@@ -208,11 +202,25 @@
 				break;
 
 			case 'linesCleared':
-				// Shift local board down when opponent clears lines
+				// Shift OUR board down when opponent clears lines (penalty)
 				for (let i = 0; i < message.data.lines; i++) {
 					localEngine.shiftBoard('down');
 				}
 				updateLocalState();
+				// Send updated state after being shifted
+				if (p2p && p2p.isConnected()) {
+					const updateMessage: GameMessage = {
+						type: 'state',
+						data: {
+							board: localState.board,
+							colorBoard: localState.colorBoard,
+							currentPiece: localState.currentPiece,
+							score: localState.score,
+							linesCleared: localState.linesCleared
+						}
+					};
+					p2p.send(updateMessage);
+				}
 				break;
 
 			case 'gameOver':
