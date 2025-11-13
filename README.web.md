@@ -26,7 +26,7 @@ A modern web-based rebuild of the classic Tetris DS dual mode game. Built with S
 ### Prerequisites
 
 - Node.js 18+
-- npm or pnpm
+- pnpm 9+ (recommended) - Install with: `npm install -g pnpm`
 - Cloudflare account (for deployment)
 - Google OAuth credentials
 
@@ -35,7 +35,7 @@ A modern web-based rebuild of the classic Tetris DS dual mode game. Built with S
 1. **Clone and install dependencies:**
 
 ```bash
-npm install
+pnpm install
 ```
 
 2. **Set up environment variables:**
@@ -55,20 +55,20 @@ Required variables:
 
 ```bash
 # Create the database
-npx wrangler d1 create tetris-dual-db
+pnpm wrangler d1 create tetris-dual-db
 
 # Update wrangler.toml with your database ID
 # Generate database schema
-npm run db:generate
+pnpm db:generate
 
 # Apply migrations
-npm run db:migrate
+pnpm db:migrate
 ```
 
 4. **Run development server:**
 
 ```bash
-npm run dev
+pnpm dev
 ```
 
 Visit `http://localhost:5173` to play!
@@ -131,13 +131,13 @@ src/
 1. **Build the project:**
 
 ```bash
-npm run build
+pnpm build
 ```
 
 2. **Deploy to Cloudflare:**
 
 ```bash
-npm run deploy
+pnpm deploy
 ```
 
 3. **Set environment variables in Cloudflare Dashboard:**
@@ -150,19 +150,19 @@ npm run deploy
 
 ```bash
 # Generate new migrations
-npm run db:generate
+pnpm db:generate
 
 # Apply migrations
-npm run db:migrate
+pnpm db:migrate
 
 # Open Drizzle Studio
-npm run db:studio
+pnpm db:studio
 ```
 
 ### Type Checking
 
 ```bash
-npm run check
+pnpm check
 ```
 
 ## Original Game

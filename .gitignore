@@ -17,6 +17,7 @@ build
 dist
 .wrangler
 wrangler.toml.local
+package-lock.json
 
 # Misc
 *.log

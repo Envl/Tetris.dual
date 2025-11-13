@@ -4,8 +4,14 @@ Get your Tetris.dual web game running in minutes!
 
 ## 1. Install Dependencies
 
+First, install pnpm if you haven't already:
 ```bash
-npm install
+npm install -g pnpm
+```
+
+Then install project dependencies:
+```bash
+pnpm install
 ```
 
 ## 2. Run Development Server (Without Auth)
@@ -13,7 +19,7 @@ npm install
 For quick testing without authentication:
 
 ```bash
-npm run dev
+pnpm dev
 ```
 
 Then visit http://localhost:5173 and click "Solo Mode" to play!
@@ -47,18 +53,15 @@ AUTH_SECRET=$(openssl rand -base64 32)
 ### C. Set Up Cloudflare (For Deployment)
 
 ```bash
-# Install Wrangler CLI
-npm install -g wrangler
-
 # Login to Cloudflare
-wrangler login
+pnpm wrangler login
 
 # Create D1 Database
-wrangler d1 create tetris-dual-db
+pnpm wrangler d1 create tetris-dual-db
 
 # Copy the database ID and update wrangler.toml
 # Then run migrations
-npm run db:migrate
+pnpm db:migrate
 ```
 
 ## 4. Play!
@@ -87,15 +90,15 @@ lsof -ti:5173 | xargs kill -9
 
 ### TypeScript errors
 ```bash
-npm run check
+pnpm check
 ```
 
 ### Build fails
 ```bash
 # Clear cache
-rm -rf .svelte-kit node_modules
-npm install
-npm run build
+rm -rf .svelte-kit node_modules pnpm-lock.yaml
+pnpm install
+pnpm build
 ```
 
 ## Next Steps
