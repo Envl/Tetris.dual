@@ -1,0 +1,40 @@
+{
+  "name": "tetris-dual-web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "deploy": "wrangler pages deploy .svelte-kit/cloudflare",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "@sveltejs/adapter-cloudflare": "^4.7.3",
+    "@sveltejs/kit": "^2.11.1",
+    "@sveltejs/vite-plugin-svelte": "^5.0.2",
+    "@tailwindcss/vite": "^4.0.0-beta.7",
+    "@types/node": "^22.10.2",
+    "autoprefixer": "^10.4.20",
+    "drizzle-kit": "^0.30.1",
+    "postcss": "^8.4.49",
+    "svelte": "^5.2.10",
+    "svelte-check": "^4.1.1",
+    "tailwindcss": "^4.0.0-beta.7",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "wrangler": "^3.95.0"
+  },
+  "dependencies": {
+    "@auth/core": "^0.37.4",
+    "@auth/sveltekit": "^1.7.4",
+    "drizzle-orm": "^0.39.3",
+    "simple-peer": "^9.11.1"
+  }
+}
