@@ -1,383 +1,424 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
-	import { goto } from '$app/navigation';
-	import GameBoard from '$lib/components/GameBoard.svelte';
-	import NextPieces from '$lib/components/NextPieces.svelte';
-	import ScoreBoard from '$lib/components/ScoreBoard.svelte';
-	import GameControls from '$lib/components/GameControls.svelte';
-	import { TetrisEngine, BOARD_WIDTH, EXTENDED_HEIGHT } from '$lib/game/engine';
-	import { P2PConnection } from '$lib/multiplayer/p2p';
-	import type { GameMessage } from '$lib/game/types';
+  import { onMount, onDestroy } from 'svelte'
+  import { goto } from '$app/navigation'
+  import GameBoard from '$lib/components/GameBoard.svelte'
+  import NextPieces from '$lib/components/NextPieces.svelte'
+  import ScoreBoard from '$lib/components/ScoreBoard.svelte'
+  import GameControls from '$lib/components/GameControls.svelte'
+  import {
+    DualGameManager,
+    type DualGameSnapshot,
+  } from '$lib/game/dual-game'
+  import { P2PConnection } from '$lib/multiplayer/p2p'
+  import type { GameMessage } from '$lib/game/types'
+  import { MatchmakingService } from '$lib/multiplayer/matchmaking'
 
-	let localEngine: TetrisEngine;
+  const MATCHMAKING_URL = import.meta.env.VITE_MATCHMAKING_URL
 
-	let localState = $state({
-		board: [] as number[][],
-		colorBoard: [] as string[][],
-		currentPiece: null as any,
-		nextPieces: [] as any[],
-		score: 0,
-		linesCleared: 0,
-		level: 1,
-		gameOver: false,
-		shadowY: 0
-	});
+  let gameManager: DualGameManager | null = null
+  let matchmakingService: MatchmakingService
+  let roomId: string | null = null
+  let isPlayer1 = $state(false) // Our player role
 
-	let remoteState = $state({
-		board: [] as number[][],
-		colorBoard: [] as string[][],
-		currentPiece: null as any,
-		score: 0,
-		linesCleared: 0
-	});
+  // Game state for rendering - this is the COMBINED board showing both players
+  let gameState = $state({
+    board: [] as number[][],
+    colorBoard: [] as string[][],
+    currentPiece: null as any,
+    nextPieces: [] as any[],
+    score: 0,
+    linesCleared: 0,
+    level: 1,
+    gameOver: false,
+    shadowY: 0,
+  })
 
-	// Track previous lines for shift detection
-	let previousLocalLines = 0;
+  // Opponent state - we'll merge their pieces onto our board
+  let opponentState = $state({
+    board: [] as number[][],
+    colorBoard: [] as string[][],
+    currentPiece: null as any,
+    score: 0,
+    linesCleared: 0,
+    level: 1,
+    gameOver: false,
+    shadowY: 0,
+  })
 
-	let gameInterval: ReturnType<typeof setInterval>;
-	let dropSpeed = $state(600);
-	let matchmaking = $state<'searching' | 'connected' | 'disconnected'>('searching');
-	let p2p: P2PConnection;
+  // Game result tracking
+  let gameResult = $state<'playing' | 'win' | 'lose' | 'tie'>('playing')
 
-	onMount(() => {
-		initializeGame();
-		connectToMatchmaking();
-	});
+  // Rematch state
+  let rematchRequested = $state(false)
+  let opponentRematch = false
+  let showOpponentLeft = $state(false)
 
-	onDestroy(() => {
-		if (gameInterval) clearInterval(gameInterval);
-		if (p2p) p2p.destroy();
-		window.removeEventListener('keydown', handleKeyDown);
-	});
+  let gameInterval: ReturnType<typeof setInterval>
+  let dropSpeed = $state(600)
+  let matchmaking = $state<'searching' | 'connected' | 'disconnected'>(
+    'searching'
+  )
+  let p2p: P2PConnection
+  let unsubscribeGameManager: (() => void) | null = null
 
-	async function connectToMatchmaking() {
-		// This is a simplified version - you'll need to implement WebSocket connection to Durable Object
-		// For now, we'll simulate a connection
-		setTimeout(() => {
-			matchmaking = 'connected';
-			const isHost = Math.random() > 0.5;
-			p2p = new P2PConnection(isHost);
-			p2p.initialize();
+  onMount(() => {
+    connectToMatchmaking()
+    window.addEventListener('keydown', handleKeyDown)
+  })
 
-			p2p.onConnection((connected) => {
-				if (connected) {
-					matchmaking = 'connected';
-					startGameLoop();
-				} else {
-					matchmaking = 'disconnected';
-				}
-			});
+  onDestroy(() => {
+    if (gameInterval) clearInterval(gameInterval)
+    unsubscribeGameManager?.()
+    if (p2p) p2p.destroy()
+    if (matchmakingService) {
+      matchmakingService.leaveQueue().catch(() => {})
+    }
+    window.removeEventListener('keydown', handleKeyDown)
+  })
 
-			p2p.onMessage((message) => {
-				handleRemoteMessage(message);
-			});
-		}, 2000);
-	}
+  async function connectToMatchmaking() {
+    try {
+      console.log('[DualMode] Starting matchmaking...')
+      matchmakingService = new MatchmakingService(MATCHMAKING_URL)
 
-	function initializeGame() {
-		localEngine = new TetrisEngine(true);
-		localEngine.initialize();
+      console.log('[DualMode] Joining queue...')
+      const result = await matchmakingService.joinQueue()
+      console.log('[DualMode] joinQueue resolved with result:', result)
 
-		updateLocalState();
-		previousLocalLines = 0;
+      roomId = result.roomId
+      isPlayer1 = result.isHost // Host becomes player 1
 
-		window.addEventListener('keydown', handleKeyDown);
-	}
+      console.log(
+        '[DualMode] Matched! roomId=',
+        roomId,
+        'isHost=',
+        result.isHost
+      )
 
-	function startGameLoop() {
-		gameInterval = setInterval(() => {
-			if (matchmaking === 'connected' && !localState.gameOver) {
-				localEngine.move('down');
-				updateLocalState();
-				sendGameState();
-			}
-		}, dropSpeed);
-	}
+      initializeGameManager()
 
-	function updateLocalState() {
-		localState.board = localEngine.getBoard();
-		localState.colorBoard = localEngine.getColorBoard();
-		localState.currentPiece = localEngine.getCurrentPiece();
-		localState.nextPieces = localEngine.getNextPieces();
-		localState.score = localEngine.getScore();
-		localState.linesCleared = localEngine.getLinesCleared();
-		localState.level = localEngine.getLevel();
-		localState.gameOver = localEngine.isGameOver();
-		localState.shadowY = localEngine.calculateShadowPosition();
+      console.log('[DualMode] Creating P2P connection, isHost=', result.isHost)
+      p2p = new P2PConnection(result.isHost)
+      console.log('[DualMode] P2P instance created')
 
-		if (localState.gameOver) {
-			clearInterval(gameInterval);
-			sendGameOver();
-		}
-	}
+      // Set up P2P callbacks BEFORE initializing
+      console.log('[DualMode] Setting up P2P callbacks...')
+      p2p.onSignal(signal => {
+        if (!roomId) return
+        console.log('[DualMode] P2P generated signal, sending to DO')
+        matchmakingService.sendSignal(roomId, signal)
+      })
 
-	function handleKeyDown(e: KeyboardEvent) {
-		if (localState.gameOver || matchmaking !== 'connected') return;
+      p2p.onConnection(connected => {
+        console.log('[DualMode] P2P connection state changed:', connected)
+        if (connected) {
+          matchmaking = 'connected'
+          startGameLoop()
+          gameManager?.setConnectionState(true)
+        } else {
+          matchmaking = 'disconnected'
+          gameManager?.setConnectionState(false)
+          if (!gameState.gameOver) {
+            showOpponentLeft = true
+          }
+        }
+      })
 
-		let moved = false;
-		switch (e.key) {
-			case 'ArrowLeft':
-				e.preventDefault();
-				moved = localEngine.move('left');
-				break;
-			case 'ArrowRight':
-				e.preventDefault();
-				moved = localEngine.move('right');
-				break;
-			case 'ArrowDown':
-				e.preventDefault();
-				moved = localEngine.move('down');
-				break;
-			case 'ArrowUp':
-			case ' ':
-				e.preventDefault();
-				moved = localEngine.move('rotate');
-				break;
-			case 'Enter':
-				e.preventDefault();
-				localEngine.drop();
-				moved = true;
-				break;
-		}
+      p2p.onMessage(message => {
+        handleRemoteMessage(message)
+      })
 
-		if (moved) {
-			updateLocalState();
-			sendGameState();
-		}
-	}
+      // Set up signal relay from matchmaking to P2P
+      matchmakingService.onSignal(signal => {
+        console.log('[DualMode] Received signal from DO, passing to P2P')
+        p2p.signal(signal)
+      })
+      console.log('[DualMode] Callbacks set up')
 
-	function sendGameState() {
-		if (p2p && p2p.isConnected()) {
-			const message: GameMessage = {
-				type: 'state',
-				data: {
-					board: localState.board,
-					colorBoard: localState.colorBoard,
-					currentPiece: localState.currentPiece,
-					score: localState.score,
-					linesCleared: localState.linesCleared
-				}
-			};
-			p2p.send(message);
+      console.log('[DualMode] About to initialize P2P')
+      await p2p.initialize()
+      console.log('[DualMode] P2P initialized successfully')
+    } catch (error) {
+      console.error('[DualMode] Error during matchmaking/connection:', error)
+      matchmaking = 'disconnected'
+    }
+  }
 
-			// Check if WE cleared lines since our last check (not comparing with opponent!)
-			const newLinesCleared = localState.linesCleared - previousLocalLines;
-			if (newLinesCleared > 0) {
-				// Like Tetris DS: clearing 2+ lines shifts opponent's board
-				if (newLinesCleared >= 2) {
-					const shiftMessage: GameMessage = {
-						type: 'linesCleared',
-						data: { lines: Math.floor(newLinesCleared / 2) }
-					};
-					p2p.send(shiftMessage);
-				}
-				// Update tracker
-				previousLocalLines = localState.linesCleared;
-			}
-		}
-	}
+  function initializeGameManager() {
+    unsubscribeGameManager?.()
+    gameManager = new DualGameManager({
+      isPlayer1,
+      sendMessage: message => {
+        if (p2p && p2p.isConnected()) {
+          p2p.send(message)
+        }
+      },
+    })
+    unsubscribeGameManager = gameManager.subscribe(applySnapshot)
+  }
 
-	function sendGameOver() {
-		if (p2p && p2p.isConnected()) {
-			const message: GameMessage = {
-				type: 'gameOver',
-				data: {
-					score: localState.score,
-					linesCleared: localState.linesCleared
-				}
-			};
-			p2p.send(message);
-		}
-	}
+  function applySnapshot(snapshot: DualGameSnapshot) {
+    gameState = snapshot.gameState
+    opponentState = snapshot.opponentState
+    gameResult = snapshot.gameResult
+  }
 
-	function handleRemoteMessage(message: GameMessage) {
-		switch (message.type) {
-			case 'state':
-				// Update remote state from opponent's game
-				remoteState.board = message.data.board;
-				remoteState.colorBoard = message.data.colorBoard;
-				remoteState.currentPiece = message.data.currentPiece;
-				remoteState.score = message.data.score;
-				remoteState.linesCleared = message.data.linesCleared;
-				break;
+  function startGameLoop() {
+    if (gameInterval) clearInterval(gameInterval)
+    gameInterval = setInterval(() => {
+      if (
+        matchmaking === 'connected' &&
+        gameManager &&
+        !gameState.gameOver
+      ) {
+        gameManager.tick()
+      }
+    }, dropSpeed)
+  }
 
-			case 'linesCleared':
-				// Shift OUR board down when opponent clears lines (penalty)
-				for (let i = 0; i < message.data.lines; i++) {
-					localEngine.shiftBoard('down');
-				}
-				updateLocalState();
-				// Send updated state after being shifted
-				if (p2p && p2p.isConnected()) {
-					const updateMessage: GameMessage = {
-						type: 'state',
-						data: {
-							board: localState.board,
-							colorBoard: localState.colorBoard,
-							currentPiece: localState.currentPiece,
-							score: localState.score,
-							linesCleared: localState.linesCleared
-						}
-					};
-					p2p.send(updateMessage);
-				}
-				break;
+  function handleKeyDown(e: KeyboardEvent) {
+    if (gameState.gameOver || matchmaking !== 'connected') return
 
-			case 'gameOver':
-				// Opponent lost, we win!
-				localState.gameOver = true;
-				clearInterval(gameInterval);
-				break;
-		}
-	}
+    switch (e.key) {
+      case 'ArrowLeft':
+        e.preventDefault()
+        gameManager?.moveLeft()
+        break
+      case 'ArrowRight':
+        e.preventDefault()
+        gameManager?.moveRight()
+        break
+      case 'ArrowDown':
+        e.preventDefault()
+        gameManager?.softDrop()
+        break
+      case 'ArrowUp':
+      case ' ':
+        e.preventDefault()
+        gameManager?.rotate()
+        break
+      case 'Enter':
+        e.preventDefault()
+        gameManager?.hardDrop()
+        break
+    }
+  }
 
-	function handleLeft() {
-		if (localEngine.move('left')) {
-			updateLocalState();
-			sendGameState();
-		}
-	}
+  function handleRemoteMessage(message: GameMessage) {
+    console.log('[DualMode] Received remote message:', message.type)
+    switch (message.type) {
+      case 'action':
+      case 'pieceState':
+      case 'gameOver':
+        gameManager?.handleRemoteMessage(message)
+        break
+      case 'restart':
+        // Opponent requested rematch
+        opponentRematch = true
+        checkRematchStart()
+        break
+    }
+  }
 
-	function handleRight() {
-		if (localEngine.move('right')) {
-			updateLocalState();
-			sendGameState();
-		}
-	}
+  function handleLeft() {
+    gameManager?.moveLeft()
+  }
 
-	function handleRotate() {
-		if (localEngine.move('rotate')) {
-			updateLocalState();
-			sendGameState();
-		}
-	}
+  function handleRight() {
+    gameManager?.moveRight()
+  }
 
-	function handleDrop() {
-		localEngine.drop();
-		updateLocalState();
-		sendGameState();
-	}
+  function handleRotate() {
+    gameManager?.rotate()
+  }
 
-	function handleDown() {
-		if (localEngine.move('down')) {
-			updateLocalState();
-			sendGameState();
-		}
-	}
+  function handleDrop() {
+    gameManager?.hardDrop()
+  }
+
+  function handleDown() {
+    gameManager?.softDrop()
+  }
+
+  // Rematch functions
+  function requestRematch() {
+    if (!rematchRequested && p2p && p2p.isConnected()) {
+      rematchRequested = true
+      const message: GameMessage = { type: 'restart', data: {} }
+      p2p.send(message)
+      checkRematchStart()
+    }
+  }
+
+  function leaveGame() {
+    goto('/')
+  }
+
+  function checkRematchStart() {
+    if (rematchRequested && opponentRematch && gameManager) {
+      // Both players want to rematch - reset game state
+      gameManager.resetForRematch()
+      const snapshot = gameManager.getSnapshot()
+      gameState = snapshot.gameState
+      opponentState = snapshot.opponentState
+      gameResult = 'playing'
+      rematchRequested = false
+      opponentRematch = false
+      showOpponentLeft = false
+      startGameLoop()
+    }
+  }
 </script>
 
-<div class="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 p-4">
-	<div class="max-w-7xl mx-auto">
-		<!-- Header -->
-		<div class="flex justify-between items-center mb-4">
-			<button
-				onclick={() => goto('/')}
-				class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded"
-			>
-				← Back
-			</button>
-			<h1 class="text-3xl font-bold text-white">Dual Mode</h1>
-			<div class="px-4 py-2 rounded" class:bg-green-600={matchmaking === 'connected'}
-				class:bg-yellow-600={matchmaking === 'searching'}
-				class:bg-red-600={matchmaking === 'disconnected'}>
-				{#if matchmaking === 'searching'}
-					⏳ Searching...
-				{:else if matchmaking === 'connected'}
-					✓ Connected
-				{:else}
-					✗ Disconnected
-				{/if}
-			</div>
-		</div>
+<div class="min-h-screen bg-linear-to-b from-gray-900 to-gray-800 p-4">
+  <div class="max-w-7xl mx-auto">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-4">
+      <button
+        onclick={() => goto('/')}
+        class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded"
+      >
+        ← Back
+      </button>
+      <h1 class="text-3xl font-bold text-white">Dual Mode - Push Battle</h1>
+      <div
+        class="px-4 py-2 rounded"
+        class:bg-green-600={matchmaking === 'connected'}
+        class:bg-yellow-600={matchmaking === 'searching'}
+        class:bg-red-600={matchmaking === 'disconnected'}
+      >
+        {#if matchmaking === 'searching'}
+          ⏳ Searching...
+        {:else if matchmaking === 'connected'}
+          ✓ Connected ({isPlayer1 ? 'Player 1' : 'Player 2'})
+        {:else}
+          ✗ Disconnected
+        {/if}
+      </div>
+    </div>
 
-		<!-- Matchmaking Screen -->
-		{#if matchmaking === 'searching'}
-			<div class="flex items-center justify-center h-96">
-				<div class="text-center">
-					<div class="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
-					<h2 class="text-2xl text-white">Finding opponent...</h2>
-				</div>
-			</div>
-		{:else if matchmaking === 'connected'}
-			<!-- Game Area - Dual Boards -->
-			<div class="flex flex-col gap-8">
-				<!-- Opponent Board (Flipped) -->
-				<div class="flex flex-col items-center">
-					<h3 class="text-xl font-bold text-red-400 mb-2">Opponent</h3>
-					<div class="flex gap-4 items-start">
-						<ScoreBoard score={remoteState.score} lines={remoteState.linesCleared} level={1} />
-						{#if remoteState.board.length > 0}
-							<GameBoard
-								board={remoteState.board.slice(4, 24)}
-								colorBoard={remoteState.colorBoard.slice(4, 24)}
-								currentPiece={remoteState.currentPiece}
-								cellSize={20}
-								showGhost={false}
-								flipped={true}
-							/>
-						{/if}
-					</div>
-				</div>
+    <!-- Matchmaking Screen -->
+    {#if matchmaking === 'searching'}
+      <div class="flex items-center justify-center h-96">
+        <div class="text-center">
+          <div
+            class="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"
+          ></div>
+          <h2 class="text-2xl text-white">Finding opponent...</h2>
+        </div>
+      </div>
+    {:else if matchmaking === 'connected'}
+      <!-- Game Area - Shared Board -->
+      <div class="flex flex-col gap-4 items-center">
+        <!-- Opponent Info -->
+        <div class="text-center">
+          <h3 class="text-xl font-bold text-red-400 mb-2">
+            Opponent ({isPlayer1 ? 'Player 2' : 'Player 1'})
+          </h3>
+          <ScoreBoard
+            score={opponentState.score}
+            lines={opponentState.linesCleared}
+            level={opponentState.level}
+          />
+        </div>
 
-				<!-- Local Board -->
-				<div class="flex flex-col items-center">
-					<h3 class="text-xl font-bold text-green-400 mb-2">You</h3>
-					<div class="flex gap-4 items-start">
-						<NextPieces pieces={localState.nextPieces} cellSize={15} />
-						{#if localState.board.length > 0}
-							<GameBoard
-								board={localState.board.slice(4, 24)}
-								colorBoard={localState.colorBoard.slice(4, 24)}
-								currentPiece={localState.currentPiece}
-								shadowY={localState.shadowY}
-								cellSize={25}
-								showGhost={true}
-							/>
-						{/if}
-						<ScoreBoard score={localState.score} lines={localState.linesCleared} level={localState.level} />
-					</div>
-				</div>
+        <!-- Single Shared Board -->
+        <div class="flex gap-4 items-center">
+          <div class="flex flex-col gap-2">
+            <NextPieces pieces={gameState.nextPieces} cellSize={15} />
+          </div>
 
-				<!-- Controls -->
-				<div class="lg:hidden">
-					<GameControls
-						onLeft={handleLeft}
-						onRight={handleRight}
-						onRotate={handleRotate}
-						onDrop={handleDrop}
-						onDown={handleDown}
-					/>
-				</div>
-			</div>
-		{/if}
+          {#if gameState.board.length > 0}
+            <div class="relative">
+              <GameBoard
+                board={gameState.board}
+                colorBoard={gameState.colorBoard}
+                currentPiece={gameState.currentPiece}
+                shadowY={gameState.shadowY}
+                cellSize={20}
+                showGhost={true}
+                flipped={!isPlayer1}
+              />
+            </div>
+          {/if}
 
-		<!-- Game Over Modal -->
-		{#if localState.gameOver}
-			<div class="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-				<div class="bg-gray-800 p-8 rounded-lg border-4 border-green-500 max-w-md">
-					<h2 class="text-3xl font-bold text-white mb-4">
-						{remoteState.score < localState.score ? 'You Win!' : 'You Lose!'}
-					</h2>
-					<div class="text-gray-300 space-y-2 mb-6">
-						<p class="text-xl">Your Score: <strong class="text-green-400">{localState.score}</strong></p>
-						<p class="text-xl">Opponent: <strong class="text-red-400">{remoteState.score}</strong></p>
-					</div>
-					<div class="flex gap-4">
-						<button
-							onclick={() => goto('/game/dual')}
-							class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg"
-						>
-							Play Again
-						</button>
-						<button
-							onclick={() => goto('/')}
-							class="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-lg"
-						>
-							Menu
-						</button>
-					</div>
-				</div>
-			</div>
-		{/if}
-	</div>
+          <ScoreBoard
+            score={gameState.score}
+            lines={gameState.linesCleared}
+            level={gameState.level}
+          />
+        </div>
+
+        <!-- Your Info -->
+        <div class="text-center">
+          <h3 class="text-xl font-bold text-green-400 mb-2">
+            You ({isPlayer1 ? 'Player 1' : 'Player 2'})
+          </h3>
+        </div>
+
+        <!-- Controls -->
+        <div class="lg:hidden">
+          <GameControls
+            onLeft={handleLeft}
+            onRight={handleRight}
+            onRotate={handleRotate}
+            onDrop={handleDrop}
+            onDown={handleDown}
+          />
+        </div>
+      </div>
+    {/if}
+
+    <!-- Game Over/Rematch Modal -->
+    {#if gameState.gameOver || opponentState.gameOver}
+      <div
+        class="fixed inset-0 bg-black/80 flex items-center justify-center z-50"
+      >
+        <div
+          class="bg-gray-800 p-8 rounded-lg border-4 max-w-md"
+          class:border-green-500={gameResult === 'win'}
+          class:border-red-500={gameResult === 'lose'}
+          class:border-yellow-500={gameResult === 'tie'}
+        >
+          <h2 class="text-3xl font-bold text-white mb-4">
+            {#if gameResult === 'win'}You Win! 🎉
+            {:else if gameResult === 'lose'}You Lose 😢
+            {:else if gameResult === 'tie'}It's a Tie! 🤝
+            {:else}Game Over{/if}
+          </h2>
+          <div class="text-gray-300 space-y-2 mb-6">
+            <p class="text-xl">
+              Your Score: <strong class="text-green-400"
+                >{gameState.score}</strong
+              >
+            </p>
+            <p class="text-xl">
+              Opponent: <strong class="text-red-400"
+                >{opponentState.score}</strong
+              >
+            </p>
+          </div>
+          {#if showOpponentLeft}
+            <div class="text-red-400 text-lg mb-4">Opponent left the game.</div>
+          {:else}
+            <div class="flex gap-4">
+              <button
+                onclick={requestRematch}
+                class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg"
+                disabled={rematchRequested}
+              >
+                {rematchRequested ? 'Waiting for Opponent...' : 'Play Again'}
+              </button>
+              <button
+                onclick={leaveGame}
+                class="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-lg"
+              >
+                Menu
+              </button>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+  </div>
 </div>
