@@ -30,6 +30,7 @@ describe('DualGameManager action synchronization', () => {
     colorSnapshot[targetRow][0] = '#ff0'
 
     const action: GameAction = {
+      actionId: 'test-action-0',
       sequenceId: 0,
       playerId: 1,
       type: 'boardShift',
@@ -74,6 +75,7 @@ describe('DualGameManager action synchronization', () => {
     shiftColors[shiftRow][shiftCol] = '#f0f'
 
     const firstAction: GameAction = {
+      actionId: 'test-action-1',
       sequenceId: 0,
       playerId: 1,
       type: 'boardShift',
@@ -95,6 +97,7 @@ describe('DualGameManager action synchronization', () => {
     shiftColors[lockRow][lockCol] = '#0ff'
 
     const lateAction: GameAction = {
+      actionId: 'test-action-2',
       sequenceId: 1,
       playerId: 1,
       type: 'pieceLocked',
