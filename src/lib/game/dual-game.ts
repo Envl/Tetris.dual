@@ -8,7 +8,6 @@ import {
 import type { GameAction, GameMessage, Tetromino } from './types'
 
 export type GameResult = 'playing' | 'win' | 'lose' | 'tie'
-export type PlayerKey = 'player1' | 'player2'
 
 export interface RenderGameState {
   board: number[][]
@@ -25,12 +24,10 @@ export interface RenderGameState {
 export interface OpponentState {
   board: number[][]
   colorBoard: string[][]
-  currentPiece: Tetromino | null
   score: number
   linesCleared: number
   level: number
   gameOver: boolean
-  shadowY: number
 }
 
 export interface DualGameSnapshot {
@@ -67,12 +64,10 @@ const createInitialGameState = (): RenderGameState => ({
 const createInitialOpponentState = (): OpponentState => ({
   board: createEmptyBoard(),
   colorBoard: createEmptyColorBoard(),
-  currentPiece: null,
   score: 0,
   linesCleared: 0,
   level: 1,
   gameOver: false,
-  shadowY: 0,
 })
 
 const cloneBoard = (board: number[][]) => board.map(row => [...row])
@@ -87,17 +82,10 @@ export class DualGameManager {
   private opponentState: OpponentState = createInitialOpponentState()
   private gameResult: GameResult = 'playing'
   private actionLog: GameAction[] = []
-  private mySequenceId = 0
-  private lastAppliedSequence: Record<PlayerKey, number> = {
-    player1: -1,
-    player2: -1,
-  }
-  private pendingActions: Record<PlayerKey, Map<number, GameAction>> = {
-    player1: new Map(),
-    player2: new Map(),
-  }
+  private sequenceTimestamp = 0
+  private sequenceCounter = 0
+  private actionIds = new Set<string>()
   private listeners = new Set<(snapshot: DualGameSnapshot) => void>()
-  private lastSentPieceSignature: string | null = null
   private sendGameOverFlag = false
   private lastActionTimestamp = 0
   private actionCounter = 0
@@ -130,10 +118,6 @@ export class DualGameManager {
 
   setConnectionState(connected: boolean) {
     this.connectionReady = connected
-    if (connected) {
-      this.lastSentPieceSignature = null
-      this.sendPieceState(true)
-    }
   }
 
   tick() {
@@ -172,9 +156,6 @@ export class DualGameManager {
       case 'action':
         this.handleRemoteAction(message.data)
         break
-      case 'pieceState':
-        this.handlePieceStateMessage(message.data)
-        break
       case 'gameOver':
         this.handleOpponentGameOver()
         break
@@ -185,10 +166,14 @@ export class DualGameManager {
 
   handleRemoteAction(action: GameAction) {
     if (!action) return
-    this.actionLog.push(action)
-    const applied = this.enqueueRemoteAction(action)
-    if (applied) {
+    const position = this.insertAction(action)
+    if (position === 'duplicate') return
+
+    if (position === 'append') {
+      this.applyAction(action)
       this.updateGameState({ broadcast: false })
+    } else {
+      this.rebuildFromActionLog({ broadcast: false })
     }
   }
 
@@ -198,11 +183,9 @@ export class DualGameManager {
     this.currentGameState = createInitialGameState()
     this.gameResult = 'playing'
     this.actionLog = []
-    this.mySequenceId = 0
-    this.lastAppliedSequence = { player1: -1, player2: -1 }
-    this.pendingActions.player1.clear()
-    this.pendingActions.player2.clear()
-    this.lastSentPieceSignature = null
+    this.actionIds.clear()
+    this.sequenceTimestamp = 0
+    this.sequenceCounter = 0
     this.sendGameOverFlag = false
     this.updateGameState({ broadcast: false })
   }
@@ -214,15 +197,14 @@ export class DualGameManager {
         board: cloneBoard(this.currentGameState.board),
         colorBoard: cloneColorBoard(this.currentGameState.colorBoard),
         currentPiece: this.clonePiece(this.currentGameState.currentPiece),
-        nextPieces: this.currentGameState.nextPieces.map(piece =>
-          this.clonePiece(piece)!
+        nextPieces: this.currentGameState.nextPieces.map(
+          piece => this.clonePiece(piece)!
         ),
       },
       opponentState: {
         ...this.opponentState,
         board: cloneBoard(this.opponentState.board),
         colorBoard: cloneColorBoard(this.opponentState.colorBoard),
-        currentPiece: this.clonePiece(this.opponentState.currentPiece),
       },
       gameResult: this.gameResult,
     }
@@ -247,7 +229,7 @@ export class DualGameManager {
     if (this.currentGameState.gameOver) return
     const action: GameAction = {
       actionId: this.generateActionId(),
-      sequenceId: this.mySequenceId++,
+      sequenceId: this.generateSequenceId(),
       playerId: (this.isPlayer1 ? 1 : 2) as 1 | 2,
       type: 'pieceLocked',
       data: {
@@ -261,8 +243,16 @@ export class DualGameManager {
       },
     }
 
-    this.actionLog.push(action)
-    this.applyAction(action)
+    const position = this.insertAction(action)
+    if (position === 'duplicate') return
+
+    if (position === 'append') {
+      this.applyAction(action)
+      this.updateGameState()
+    } else {
+      this.rebuildFromActionLog()
+    }
+
     this.sendAction(action)
   }
 
@@ -273,7 +263,7 @@ export class DualGameManager {
 
     const action: GameAction = {
       actionId: this.generateActionId(),
-      sequenceId: this.mySequenceId++,
+      sequenceId: this.generateSequenceId(),
       playerId: (this.isPlayer1 ? 1 : 2) as 1 | 2,
       type: 'boardShift',
       data: {
@@ -286,8 +276,16 @@ export class DualGameManager {
       },
     }
 
-    this.actionLog.push(action)
-    this.applyAction(action)
+    const position = this.insertAction(action)
+    if (position === 'duplicate') return
+
+    if (position === 'append') {
+      this.applyAction(action)
+      this.updateGameState()
+    } else {
+      this.rebuildFromActionLog()
+    }
+
     this.sendAction(action)
   }
 
@@ -299,42 +297,11 @@ export class DualGameManager {
     })
   }
 
-  private enqueueRemoteAction(action: GameAction): boolean {
-    const key = this.getPlayerKey(action.playerId)
-    const expectedSequence = this.lastAppliedSequence[key] + 1
-    let applied = false
-
-    if (action.sequenceId <= this.lastAppliedSequence[key]) {
-      return false
-    }
-
-    if (action.sequenceId === expectedSequence) {
-      this.applyAction(action)
-      applied = true
-      applied = this.processPendingActions(key) || applied
-    } else {
-      this.pendingActions[key].set(action.sequenceId, action)
-    }
-
-    return applied
-  }
-
-  private processPendingActions(key: PlayerKey): boolean {
-    let applied = false
-    let nextSequence = this.lastAppliedSequence[key] + 1
-
-    while (this.pendingActions[key].has(nextSequence)) {
-      const nextAction = this.pendingActions[key].get(nextSequence)!
-      this.pendingActions[key].delete(nextSequence)
-      this.applyAction(nextAction)
-      applied = true
-      nextSequence = this.lastAppliedSequence[key] + 1
-    }
-
-    return applied
-  }
-
-  private applyAction(action: GameAction) {
+  private applyAction(
+    action: GameAction,
+    options: { applyEngineEffects?: boolean } = {}
+  ) {
+    const { applyEngineEffects = true } = options
     const isLocalAction = action.playerId === (this.isPlayer1 ? 1 : 2)
 
     const updateOpponentStats = (data: any) => {
@@ -353,14 +320,21 @@ export class DualGameManager {
       if (isLocalAction) {
         this.shiftOpponentBoard(action.data.direction, action.data.lines)
       } else {
-        this.engine.applyExternalShift(action.data.direction, action.data.lines)
+        if (applyEngineEffects) {
+          this.engine.applyExternalShift(
+            action.data.direction,
+            action.data.lines
+          )
+        }
+
+        this.shiftOpponentBoard(action.data.direction, action.data.lines)
+
         if (action.data.boardSnapshot) {
           this.applySnapshotToOpponent(action.data.boardSnapshot, {
-            onlyOpponentTerritory: true,
+            onlyOpponentTerritory: false,
           })
-        } else {
-          this.shiftOpponentBoard(action.data.direction, action.data.lines)
         }
+
         updateOpponentStats(action.data)
       }
     }
@@ -368,73 +342,19 @@ export class DualGameManager {
     if (action.type === 'pieceLocked') {
       if (!isLocalAction && action.data.boardSnapshot) {
         this.applySnapshotToOpponent(action.data.boardSnapshot, {
-          onlyOpponentTerritory: true,
+          onlyOpponentTerritory: false,
         })
       }
       if (!isLocalAction) {
         updateOpponentStats(action.data)
       }
     }
-
-    this.lastAppliedSequence[this.getPlayerKey(action.playerId)] =
-      action.sequenceId
-  }
-
-  private handlePieceStateMessage(data: any) {
-    if (!data) return
-    const senderId = (data.playerId ?? 0) as 1 | 2
-    const myId = (this.isPlayer1 ? 1 : 2) as 1 | 2
-    if (senderId === myId) return
-
-    if (data.piece) {
-      this.opponentState.currentPiece = {
-        ...data.piece,
-        position: { ...data.piece.position },
-        shape: data.piece.shape.map((row: number[]) => [...row]),
-      }
-    } else {
-      this.opponentState.currentPiece = null
-    }
-
-    if (typeof data.shadowY === 'number') {
-      this.opponentState.shadowY = data.shadowY
-    }
-    if (typeof data.score === 'number') {
-      this.opponentState.score = data.score
-    }
-    if (typeof data.linesCleared === 'number') {
-      this.opponentState.linesCleared = data.linesCleared
-    }
-    if (typeof data.level === 'number') {
-      this.opponentState.level = data.level
-    }
-
-    this.notifyStateChange()
   }
 
   private handleOpponentGameOver() {
     this.opponentState.gameOver = true
-    this.opponentState.currentPiece = null
     this.updateGameResult()
     this.notifyStateChange()
-  }
-
-  private sendPieceState(force = false) {
-    if (!this.connectionReady || !this.sendMessage) return
-    const payload = {
-      playerId: (this.isPlayer1 ? 1 : 2) as 1 | 2,
-      piece: this.clonePiece(this.engine.getCurrentPiece()),
-      shadowY: this.engine.calculateShadowPosition(),
-      score: this.engine.getScore(),
-      linesCleared: this.engine.getLinesCleared(),
-      level: this.engine.getLevel(),
-    }
-    const signature = JSON.stringify(payload)
-    if (!force && signature === this.lastSentPieceSignature) {
-      return
-    }
-    this.lastSentPieceSignature = signature
-    this.sendMessage?.({ type: 'pieceState', data: payload })
   }
 
   private sendGameOver() {
@@ -442,7 +362,6 @@ export class DualGameManager {
       return
     }
     this.sendGameOverFlag = true
-    this.sendPieceState(true)
     this.sendMessage({
       type: 'gameOver',
       data: {
@@ -460,14 +379,14 @@ export class DualGameManager {
     const boardClone = ourBoard.map(row => [...row])
     const colorClone = ourColorBoard.map(row => [...row])
 
+    // Merge opponent's board with ours
     if (this.opponentState.board.length > 0) {
       for (let y = 0; y < EXTENDED_HEIGHT; y++) {
         for (let x = 0; x < BOARD_WIDTH; x++) {
-          const inOpponentTerritory = this.isPlayer1
-            ? y >= CENTER_LINE
-            : y < CENTER_LINE
           if (this.opponentState.board[y] && this.opponentState.board[y][x]) {
-            if (inOpponentTerritory || !boardClone[y][x]) {
+            // Always show opponent pieces, even if they extend into our territory
+            // Only skip if we have our own piece at that position
+            if (!boardClone[y][x]) {
               boardClone[y][x] = this.opponentState.board[y][x]
               colorClone[y][x] = this.opponentState.colorBoard[y][x]
             }
@@ -486,10 +405,6 @@ export class DualGameManager {
       level: this.engine.getLevel(),
       gameOver: this.engine.isGameOver(),
       shadowY: this.engine.calculateShadowPosition(),
-    }
-
-    if (broadcast) {
-      this.sendPieceState()
     }
 
     if (this.currentGameState.gameOver) {
@@ -526,10 +441,6 @@ export class DualGameManager {
     this.listeners.forEach(listener => listener(snapshot))
   }
 
-  private getPlayerKey(playerId: 1 | 2): PlayerKey {
-    return (playerId === 1 ? 'player1' : 'player2') as PlayerKey
-  }
-
   private clonePiece(piece: Tetromino | null) {
     if (!piece) return null
     return {
@@ -556,10 +467,9 @@ export class DualGameManager {
 
   private updateEngineOpponentBoard() {
     this.ensureOpponentBoards()
-    const sanitized = this.opponentState.board.map((row, y) =>
-      row.map(cell => (this.isOpponentTerritoryRow(y) ? cell : 0))
-    )
-    this.engine.setOpponentBoard(sanitized)
+    // Pass the full opponent board to the engine for collision detection
+    // This includes pieces that extend into our territory
+    this.engine.setOpponentBoard(this.opponentState.board)
   }
 
   private applySnapshotToOpponent(
@@ -568,48 +478,34 @@ export class DualGameManager {
   ) {
     const { onlyOpponentTerritory = false } = options
     this.ensureOpponentBoards()
+
+    // The snapshot contains the opponent's locked pieces from their engine
+    // We should apply ALL of their pieces, even those that extend into our territory
     for (let y = 0; y < EXTENDED_HEIGHT; y++) {
-      const isOpponentRow = this.isOpponentTerritoryRow(y)
-      if (onlyOpponentTerritory && !isOpponentRow) continue
       for (let x = 0; x < BOARD_WIDTH; x++) {
-        if (!onlyOpponentTerritory || isOpponentRow) {
-          this.opponentState.board[y][x] = snapshot.board[y]?.[x] ?? 0
-          this.opponentState.colorBoard[y][x] = snapshot.colorBoard[y]?.[x] ?? ''
-        }
+        // Always apply the opponent's pieces from the snapshot
+        // The snapshot only contains the opponent's pieces, not ours
+        this.opponentState.board[y][x] = snapshot.board[y]?.[x] ?? 0
+        this.opponentState.colorBoard[y][x] = snapshot.colorBoard[y]?.[x] ?? ''
       }
     }
-    this.opponentState.currentPiece = null
+
     this.updateEngineOpponentBoard()
   }
 
   private shiftOpponentBoard(direction: 'up' | 'down', lines: number) {
     this.ensureOpponentBoards()
-  const { start, end } = this.getOpponentTerritoryBounds()
-  if (end - start <= 0) return
-
     for (let i = 0; i < lines; i++) {
       if (direction === 'down') {
-        for (let row = end - 1; row > start; row--) {
-          this.opponentState.board[row] = [
-            ...this.opponentState.board[row - 1],
-          ]
-          this.opponentState.colorBoard[row] = [
-            ...this.opponentState.colorBoard[row - 1],
-          ]
-        }
-        this.opponentState.board[start] = createEmptyRow()
-        this.opponentState.colorBoard[start] = createEmptyColorRow()
+        this.opponentState.board.pop()
+        this.opponentState.colorBoard.pop()
+        this.opponentState.board.unshift(createEmptyRow())
+        this.opponentState.colorBoard.unshift(createEmptyColorRow())
       } else {
-        for (let row = start; row < end - 1; row++) {
-          this.opponentState.board[row] = [
-            ...this.opponentState.board[row + 1],
-          ]
-          this.opponentState.colorBoard[row] = [
-            ...this.opponentState.colorBoard[row + 1],
-          ]
-        }
-        this.opponentState.board[end - 1] = createEmptyRow()
-        this.opponentState.colorBoard[end - 1] = createEmptyColorRow()
+        this.opponentState.board.shift()
+        this.opponentState.colorBoard.shift()
+        this.opponentState.board.push(createEmptyRow())
+        this.opponentState.colorBoard.push(createEmptyColorRow())
       }
     }
     this.updateEngineOpponentBoard()
@@ -631,10 +527,46 @@ export class DualGameManager {
     return `${now}-${this.actionCounter}`
   }
 
-  private getOpponentTerritoryBounds() {
-    if (this.isPlayer1) {
-      return { start: CENTER_LINE, end: EXTENDED_HEIGHT }
+  private generateSequenceId() {
+    const now = Date.now()
+    if (now === this.sequenceTimestamp) {
+      this.sequenceCounter += 1
+    } else {
+      this.sequenceTimestamp = now
+      this.sequenceCounter = 0
     }
-    return { start: 0, end: CENTER_LINE }
+    return now * 1000 + this.sequenceCounter
+  }
+
+  private insertAction(
+    action: GameAction
+  ): 'duplicate' | 'append' | 'inserted' {
+    if (this.actionIds.has(action.actionId)) {
+      return 'duplicate'
+    }
+
+    const index = this.actionLog.findIndex(
+      existing => existing.sequenceId > action.sequenceId
+    )
+
+    this.actionIds.add(action.actionId)
+
+    if (index === -1) {
+      this.actionLog.push(action)
+      return 'append'
+    }
+
+    this.actionLog.splice(index, 0, action)
+    return 'inserted'
+  }
+
+  private rebuildFromActionLog(options: { broadcast?: boolean } = {}) {
+    const { broadcast = true } = options
+    this.opponentState = createInitialOpponentState()
+    this.updateEngineOpponentBoard()
+    for (const action of this.actionLog) {
+      this.applyAction(action, { applyEngineEffects: false })
+    }
+    this.updateGameState({ broadcast })
   }
 }

@@ -36,20 +36,12 @@ export interface GameAction {
   actionId: string
   sequenceId: number
   playerId: 1 | 2
-  type: 'pieceLocked' | 'boardShift' | 'linesCleared'
+  type: 'pieceLocked' | 'boardShift'
   data: any
 }
 
 export interface GameMessage {
-  type:
-    | 'move'
-    | 'drop'
-    | 'linesCleared'
-    | 'gameOver'
-    | 'state'
-    | 'restart'
-    | 'action'
-    | 'pieceState'
+  type: 'move' | 'drop' | 'gameOver' | 'state' | 'restart' | 'action'
   data: any
   sequenceId?: number
 }

@@ -5,10 +5,7 @@
   import NextPieces from '$lib/components/NextPieces.svelte'
   import ScoreBoard from '$lib/components/ScoreBoard.svelte'
   import GameControls from '$lib/components/GameControls.svelte'
-  import {
-    DualGameManager,
-    type DualGameSnapshot,
-  } from '$lib/game/dual-game'
+  import { DualGameManager, type DualGameSnapshot } from '$lib/game/dual-game'
   import { P2PConnection } from '$lib/multiplayer/p2p'
   import type { GameMessage } from '$lib/game/types'
   import { MatchmakingService } from '$lib/multiplayer/matchmaking'
@@ -37,12 +34,10 @@
   let opponentState = $state({
     board: [] as number[][],
     colorBoard: [] as string[][],
-    currentPiece: null as any,
     score: 0,
     linesCleared: 0,
     level: 1,
     gameOver: false,
-    shadowY: 0,
   })
 
   // Game result tracking
@@ -166,11 +161,7 @@
   function startGameLoop() {
     if (gameInterval) clearInterval(gameInterval)
     gameInterval = setInterval(() => {
-      if (
-        matchmaking === 'connected' &&
-        gameManager &&
-        !gameState.gameOver
-      ) {
+      if (matchmaking === 'connected' && gameManager && !gameState.gameOver) {
         gameManager.tick()
       }
     }, dropSpeed)
@@ -208,7 +199,6 @@
     console.log('[DualMode] Received remote message:', message.type)
     switch (message.type) {
       case 'action':
-      case 'pieceState':
       case 'gameOver':
         gameManager?.handleRemoteMessage(message)
         break
@@ -309,7 +299,7 @@
       </div>
     {:else if matchmaking === 'connected'}
       <!-- Game Area - Shared Board -->
-      <div class="flex flex-col gap-4 items-center">
+      <div class="flex justify-center gap-4 items-center">
         <!-- Opponent Info -->
         <div class="text-center">
           <h3 class="text-xl font-bold text-red-400 mb-2">
