@@ -299,9 +299,9 @@ export class DualGameManager {
 
   private applyAction(
     action: GameAction,
-    options: { applyEngineEffects?: boolean } = {}
+    options: { applyEngineEffects?: boolean; isRebuild?: boolean } = {}
   ) {
-    const { applyEngineEffects = true } = options
+    const { applyEngineEffects = true, isRebuild = false } = options
     const isLocalAction = action.playerId === (this.isPlayer1 ? 1 : 2)
 
     const updateOpponentStats = (data: any) => {
@@ -318,6 +318,13 @@ export class DualGameManager {
 
     if (action.type === 'boardShift') {
       if (isLocalAction) {
+        // During rebuild, apply our own board snapshot to reconstruct engine state
+        if (isRebuild && action.data.boardSnapshot) {
+          this.engine.applyBoardState(
+            action.data.boardSnapshot.board,
+            action.data.boardSnapshot.colorBoard
+          )
+        }
         this.shiftOpponentBoard(action.data.direction, action.data.lines)
       } else {
         if (applyEngineEffects) {
@@ -340,6 +347,14 @@ export class DualGameManager {
     }
 
     if (action.type === 'pieceLocked') {
+      // During rebuild, apply our own board snapshot to reconstruct engine state
+      if (isRebuild && isLocalAction && action.data.boardSnapshot) {
+        this.engine.applyBoardState(
+          action.data.boardSnapshot.board,
+          action.data.boardSnapshot.colorBoard
+        )
+      }
+
       if (!isLocalAction && action.data.boardSnapshot) {
         this.applySnapshotToOpponent(action.data.boardSnapshot, {
           onlyOpponentTerritory: false,
@@ -562,10 +577,21 @@ export class DualGameManager {
 
   private rebuildFromActionLog(options: { broadcast?: boolean } = {}) {
     const { broadcast = true } = options
+
+    // Reset both engine board and opponent state to reconstruct from action log
+    const emptyBoard = Array(EXTENDED_HEIGHT)
+      .fill(0)
+      .map(() => Array(BOARD_WIDTH).fill(0))
+    const emptyColorBoard = Array(EXTENDED_HEIGHT)
+      .fill('')
+      .map(() => Array(BOARD_WIDTH).fill(''))
+
+    this.engine.applyBoardState(emptyBoard, emptyColorBoard)
     this.opponentState = createInitialOpponentState()
     this.updateEngineOpponentBoard()
+
     for (const action of this.actionLog) {
-      this.applyAction(action, { applyEngineEffects: false })
+      this.applyAction(action, { applyEngineEffects: false, isRebuild: true })
     }
     this.updateGameState({ broadcast })
   }
